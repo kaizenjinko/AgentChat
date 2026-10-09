@@ -1,0 +1,13 @@
+# Build output
+/agentchat
+
+# SQLite database + WAL
+chat.db
+chat.db-shm
+chat.db-wal
+
+# Local tooling / IDE
+.gitnexus/
+.claude/
+AGENTS.md
+CLAUDE.md
