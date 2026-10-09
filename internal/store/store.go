@@ -2,7 +2,6 @@ package store
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -91,16 +90,10 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // Insert stores a message and returns it with its assigned id/created_at.
 func (s *Store) Insert(userID int64, agent, room, content string, mentions []string, replyTo *int64) (*Message, error) {
-	if mentions == nil {
-		mentions = []string{}
-	}
-	mj, err := json.Marshal(mentions)
-	if err != nil {
-		return nil, err
-	}
+	mj := encodeMentions(mentions)
 	res, err := s.db.Exec(
 		`INSERT INTO messages (user_id, agent, room, content, mentions, reply_to) VALUES (?, ?, ?, ?, ?, ?)`,
-		userID, agent, room, content, string(mj), replyTo,
+		userID, agent, room, content, mj, replyTo,
 	)
 	if err != nil {
 		return nil, err
@@ -112,7 +105,75 @@ func (s *Store) Insert(userID int64, agent, room, content string, mentions []str
 	if err != nil {
 		return nil, err
 	}
-	return s.GetByID(id)
+	var created sql.NullString
+	if err := s.db.QueryRow(`SELECT created_at FROM messages WHERE id = ?`, id).Scan(&created); err != nil {
+		return nil, err
+	}
+	m := &Message{
+		ID:        id,
+		UserID:    userID,
+		Agent:     agent,
+		Room:      room,
+		Content:   content,
+		Mentions:  mentions,
+		ReplyTo:   replyTo,
+		CreatedAt: created.String,
+	}
+	if m.Mentions == nil {
+		m.Mentions = []string{}
+	}
+	return m, nil
+}
+
+// encodeMentions serialises a mention slice to the stored flat JSON array form.
+func encodeMentions(mentions []string) string {
+	if len(mentions) == 0 {
+		return "[]"
+	}
+	n := 2
+	for _, s := range mentions {
+		n += len(s) + 3
+	}
+	b := make([]byte, 0, n)
+	b = append(b, '[')
+	for i, s := range mentions {
+		if i > 0 {
+			b = append(b, ',')
+		}
+		b = appendJSONString(b, s)
+	}
+	b = append(b, ']')
+	return string(b)
+}
+
+// appendJSONString appends a JSON-quoted string. Mention names are restricted to
+// [A-Za-z0-9_@-] by the parser, so only quote and backslash can need escaping;
+// other bytes are copied verbatim.
+func appendJSONString(b []byte, s string) []byte {
+	b = append(b, '"')
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '"':
+			b = append(b, '\\', '"')
+		case '\\':
+			b = append(b, '\\', '\\')
+		case '\n':
+			b = append(b, '\\', 'n')
+		case '\r':
+			b = append(b, '\\', 'r')
+		case '\t':
+			b = append(b, '\\', 't')
+		default:
+			if c < 0x20 {
+				const hex = "0123456789abcdef"
+				b = append(b, '\\', 'u', '0', '0', hex[c>>4], hex[c&0xf])
+			} else {
+				b = append(b, c)
+			}
+		}
+	}
+	return append(b, '"')
 }
 
 // GetByID returns a single message by id. ids are globally unique, so it is not
@@ -324,13 +385,12 @@ func (s *Store) Query(userID int64, params url.Values) (*QueryResult, error) {
 	}
 	defer rows.Close()
 
-	msgs := make([]Message, 0)
+	msgs := make([]Message, 0, queryCap(limit))
 	for rows.Next() {
-		m, err := scanMessage(rows)
-		if err != nil {
+		msgs = append(msgs, Message{})
+		if err := scanMessageInto(rows, &msgs[len(msgs)-1]); err != nil {
 			return nil, err
 		}
-		msgs = append(msgs, *m)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -342,32 +402,147 @@ func placeholders(n int) string {
 	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }
 
+// queryCap returns a slice capacity hint for a query result: enough to avoid
+// repeated growth for typical pages without over-allocating when a LIMIT is
+// large but few rows match.
+func queryCap(limit int) int {
+	if limit < 8 {
+		return limit
+	}
+	if limit > 64 {
+		return 64
+	}
+	return limit
+}
+
 // scanner abstracts *sql.Row and *sql.Rows.
 type scanner interface {
 	Scan(dest ...any) error
 }
 
 func scanMessage(sc scanner) (*Message, error) {
+	m := &Message{}
+	if err := scanMessageInto(sc, m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// scanMessageInto fills dst from a row without allocating a new Message, so
+// callers appending into a slice avoid one box per row.
+func scanMessageInto(sc scanner, dst *Message) error {
 	var (
-		m       Message
-		ment    sql.NullString
+		mentRaw string
 		replyTo sql.NullInt64
 		created sql.NullString
 	)
-	if err := sc.Scan(&m.ID, &m.UserID, &m.Agent, &m.Room, &m.Content, &ment, &replyTo, &created); err != nil {
-		return nil, err
+	if err := sc.Scan(&dst.ID, &dst.UserID, &dst.Agent, &dst.Room, &dst.Content, &mentRaw, &replyTo, &created); err != nil {
+		return err
 	}
-	m.Mentions = []string{}
-	if ment.Valid && ment.String != "" {
-		var parsed []string
-		if err := json.Unmarshal([]byte(ment.String), &parsed); err == nil && parsed != nil {
-			m.Mentions = parsed
-		}
-	}
+	dst.Mentions = parseMentionsJSON(mentRaw)
 	if replyTo.Valid {
 		v := replyTo.Int64
-		m.ReplyTo = &v
+		dst.ReplyTo = &v
 	}
-	m.CreatedAt = created.String
-	return &m, nil
+	dst.CreatedAt = created.String
+	return nil
+}
+
+// parseMentionsJSON decodes the stored mentions array (always a flat JSON array
+// of strings, e.g. `["coder","reviewer"]` or `[]`) without the reflection cost
+// of encoding/json. Falls back to empty on any malformed input.
+func parseMentionsJSON(raw string) []string {
+	if len(raw) < 2 || raw[0] != '[' {
+		return []string{}
+	}
+	if raw[1] == ']' {
+		return []string{}
+	}
+	out := make([]string, 0, 4)
+	i := 1
+	for i < len(raw) {
+		c := raw[i]
+		switch c {
+		case ' ', ',', '\t', '\n', '\r':
+			i++
+		case ']':
+			return out
+		case '"':
+			i++
+			start := i
+			esc := false
+			for i < len(raw) {
+				b := raw[i]
+				if b == '\\' {
+					esc = true
+					i += 2
+					continue
+				}
+				if b == '"' {
+					break
+				}
+				i++
+			}
+			if i > len(raw) {
+				return out
+			}
+			seg := raw[start:i]
+			if esc {
+				unescaped, ok := unescapeJSONString(seg)
+				if !ok {
+					return out
+				}
+				seg = unescaped
+			}
+			out = append(out, seg)
+			i++
+		default:
+			return out
+		}
+	}
+	return out
+}
+
+// unescapeJSONString handles the escape sequences that mentions can contain
+// (backslash, quote, and the common control escapes). Returns ok=false for
+// sequences it does not decode, signalling the caller to bail out safely.
+func unescapeJSONString(s string) (string, bool) {
+	hasEsc := false
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' {
+			hasEsc = true
+			break
+		}
+	}
+	if !hasEsc {
+		return s, true
+	}
+	b := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' {
+			b = append(b, s[i])
+			continue
+		}
+		i++
+		if i >= len(s) {
+			return "", false
+		}
+		switch s[i] {
+		case '"', '\\', '/':
+			b = append(b, s[i])
+		case 'n':
+			b = append(b, '\n')
+		case 't':
+			b = append(b, '\t')
+		case 'r':
+			b = append(b, '\r')
+		case 'b':
+			b = append(b, '\b')
+		case 'f':
+			b = append(b, '\f')
+		default:
+			return "", false
+		}
+	}
+	return string(b), true
 }

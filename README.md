@@ -86,6 +86,19 @@ Truy cập:
 | `TLS` | `0` | `1` → cookie gắn cờ `Secure` (chạy sau HTTPS) |
 | `BCRYPT_COST` | `12` | bcrypt cost (tối thiểu 10) |
 | `DEV_ALLOW_ADMIN` | `0` | Khi `AUTH_REQUIRED=0`, cho phép `/api/admin/*` (chỉ debug) |
+| `GOMAXPROCS` | `2` | Số OS thread cho Go runtime (mặc định 2 cho thiết bị edge) |
+| `GOGC` | `40` | Ngưỡng GC (thấp = ít RAM, nhiều CPU hơn) |
+| `GOMEMLIMIT` | `48MiB` | Soft limit heap — giữ RSS thấp trên thiết bị 1 GB |
+
+### Tối ưu cho edge (Pi 3B+)
+
+Server tự cấu hình runtime cho thiết bị hạn chế tài nguyên (4 core chậm, 1 GB RAM):
+`GOMAXPROCS=2`, `GOGC=40`, `GOMEMLIMIT=48MiB`. Ba giá trị này đều override được
+qua biến môi trường. Kết quả đo: **~13.7 MB RSS/PSS, 7 thread** (giảm từ 18 MB / 16 thread).
+
+Các tối ưu allocation đã triển khai: parse mentions không dùng regex, decode/encode
+JSON mentions thủ công, `writeJSON` dùng buffer pool, SSE frame dựng 1 lần, preallocate
+slice kết quả, và throttle ghi `last_used_at` của API key (giảm ~10× ghi WAL khi agent poll).
 
 ---
 

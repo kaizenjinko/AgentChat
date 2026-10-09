@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -19,6 +21,8 @@ import (
 )
 
 func main() {
+	applyRuntimeTuning()
+
 	port := env("PORT", "8086")
 	host := env("HOST", "0.0.0.0")
 	dbPath := env("DB_PATH", defaultDBPath())
@@ -74,6 +78,31 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpServer.Shutdown(ctx)
+}
+
+// applyRuntimeTuning configures the Go runtime for constrained edge devices
+// (e.g. Raspberry Pi 3B+: 4 slow cores, 1 GB RAM). All knobs remain
+// overridable through the standard environment variables.
+func applyRuntimeTuning() {
+	procs := envInt("GOMAXPROCS", 2)
+	if procs < 1 {
+		procs = 1
+	}
+	runtime.GOMAXPROCS(procs)
+
+	gogc := envInt("GOGC", 40)
+	if gogc < 1 {
+		gogc = 40
+	}
+	debug.SetGCPercent(gogc)
+
+	// Soft heap limit keeps the resident set bounded on a 1 GB device. The
+	// value is a GC target, not a hard allocation cap.
+	memLimit := envInt("GOMEMLIMIT", 48<<20)
+	if memLimit > 0 {
+		debug.SetMemoryLimit(int64(memLimit))
+	}
+	log.Printf("runtime: GOMAXPROCS=%d GOGC=%d GOMEMLIMIT=%dMiB", procs, gogc, memLimit>>20)
 }
 
 func env(key, def string) string {

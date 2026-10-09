@@ -2,26 +2,56 @@ package filter
 
 import (
 	"net/url"
-	"regexp"
 	"strings"
 )
 
-// mentionRe matches @mentions: @ followed by a word of letters, digits, _ or -.
-var mentionRe = regexp.MustCompile(`@([A-Za-z0-9_][A-Za-z0-9_-]*)`)
-
-// ParseMentions extracts unique @mentions from content, preserving first-seen order.
+// ParseMentions extracts unique @mentions from content, preserving first-seen
+// order. A mention is `@` followed by a word of letters, digits, _ or -.
+// The scan is allocation-light: it reuses a small dedupe via linear scan for
+// the common case of a handful of mentions before falling back to a map.
 func ParseMentions(content string) []string {
-	matches := mentionRe.FindAllStringSubmatch(content, -1)
-	out := make([]string, 0, len(matches))
-	seen := make(map[string]struct{}, len(matches))
-	for _, m := range matches {
-		if _, ok := seen[m[1]]; ok {
+	var out []string
+	for i := 0; i < len(content); i++ {
+		if content[i] != '@' {
 			continue
 		}
-		seen[m[1]] = struct{}{}
-		out = append(out, m[1])
+		j := i + 1
+		if j >= len(content) || !isMentionStart(content[j]) {
+			continue
+		}
+		j++
+		for j < len(content) && isMentionPart(content[j]) {
+			j++
+		}
+		name := content[i+1 : j]
+		if !contains(out, name) {
+			out = append(out, name)
+		}
+		i = j - 1
+	}
+	if out == nil {
+		return []string{}
 	}
 	return out
+}
+
+func isMentionStart(c byte) bool {
+	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_'
+}
+
+func isMentionPart(c byte) bool {
+	return isMentionStart(c) || c == '-'
+}
+
+// contains reports whether s is already in a small slice (linear scan beats a
+// map allocation for the typical mention counts).
+func contains(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // CSV splits a comma separated value, trimming blanks.

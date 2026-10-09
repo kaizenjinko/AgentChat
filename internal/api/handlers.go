@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"agentchat/internal/filter"
@@ -475,18 +477,38 @@ func readBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 	return data, nil
 }
 
+var jsonBufPool = sync.Pool{New: func() any { return bytes.NewBuffer(make([]byte, 0, 8*1024)) }}
+
 func writeJSON(w http.ResponseWriter, code int, obj any) {
-	body, err := json.Marshal(obj)
-	if err != nil {
+	buf := jsonBufPool.Get().(*bytes.Buffer)
+	defer func() {
+		// Return the buffer to the pool only when it is not oversized, so a
+		// single huge response does not pin memory for the whole process.
+		if buf.Cap() <= 256*1024 {
+			buf.Reset()
+			jsonBufPool.Put(buf)
+		}
+	}()
+	enc := json.NewEncoder(buf)
+	// Keep json.Marshal's default HTML escaping so payloads stay byte-identical
+	// with the previous implementation.
+	enc.SetEscapeHTML(true)
+	if err := enc.Encode(obj); err != nil {
 		http.Error(w, `{"error":"encode error"}`, http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
+	// Encoder appends a trailing newline; trim it to keep payloads byte-identical.
+	b := buf.Bytes()
+	if n := len(b); n > 0 && b[n-1] == '\n' {
+		b = b[:n-1]
+	}
+	h := w.Header()
+	h.Set("Content-Type", "application/json; charset=utf-8")
+	h.Set("Access-Control-Allow-Origin", "*")
+	h.Set("Access-Control-Allow-Headers", "*")
+	h.Set("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
 	w.WriteHeader(code)
-	w.Write(body)
+	w.Write(b)
 }
 
 func asString(v any) string {

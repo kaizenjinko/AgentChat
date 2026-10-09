@@ -200,25 +200,44 @@ func (s *Store) CreateAPIKey(userID int64, name, agentName string) (plain string
 func (s *Store) UserByAPIKey(plain string) (*User, error) {
 	keyHash := hashKey(plain)
 	var kID int64
+	var lastUsed sql.NullString
 	var u User
 	var mustCh int
 	var created, lastSeen sql.NullString
 	err := s.db.QueryRow(
-		`SELECT k.id, u.id, u.username, u.password_hash, u.role, u.status, u.must_change_password, u.created_at, u.last_login_at
+		`SELECT k.id, k.last_used_at, u.id, u.username, u.password_hash, u.role, u.status, u.must_change_password, u.created_at, u.last_login_at
 		 FROM api_keys k JOIN users u ON u.id = k.user_id
 		 WHERE k.key_hash = ? AND k.status = 'active' AND u.status = 'active'`,
-		keyHash).Scan(&kID, &u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.Status, &mustCh, &created, &lastSeen)
+		keyHash).Scan(&kID, &lastUsed, &u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.Status, &mustCh, &created, &lastSeen)
 	if err != nil {
 		return nil, err
 	}
 	u.MustChangePassword = mustCh != 0
 	u.CreatedAt = created.String
 	u.LastLoginAt = lastSeen.String
-	if _, err := s.db.Exec(`UPDATE api_keys SET last_used_at=datetime('now') WHERE id=?`, kID); err != nil {
-		return nil, err
+	// Throttle last_used_at writes: an agent polling every few seconds would
+	// otherwise force a WAL write per request. Only refresh when the stored
+	// stamp is older than the window, cutting writes ~10x on the edge.
+	if lastUsed.String == "" || lastUsedStale(lastUsed.String) {
+		if _, err := s.db.Exec(`UPDATE api_keys SET last_used_at=datetime('now') WHERE id=?`, kID); err != nil {
+			return nil, err
+		}
 	}
 	return &u, nil
 }
+
+// lastUsedStale reports whether a stored "YYYY-MM-DD HH:MM:SS" UTC stamp is
+// older than apiKeyTouchWindow.
+func lastUsedStale(stamp string) bool {
+	t, err := time.Parse("2006-01-02 15:04:05", stamp)
+	if err != nil {
+		return true
+	}
+	return time.Since(t.UTC()) >= apiKeyTouchWindow
+}
+
+// apiKeyTouchWindow bounds how often an API key's last_used_at is rewritten.
+const apiKeyTouchWindow = 60 * time.Second
 
 func (s *Store) ListAPIKeys(userID int64) ([]APIKey, error) {
 	rows, err := s.db.Query(

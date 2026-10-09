@@ -58,16 +58,34 @@ func (h *Hub) Broadcast(userID int64, room string, msg any) {
 	if err != nil {
 		return
 	}
-	h.send(userID, room, []byte(fmt.Sprintf("event: message\ndata: %s\n\n", payload)))
+	h.send(userID, room, sseFrame("message", payload))
 }
 
 // NotifyRoomDeleted sends a "room-deleted" event for the given room.
 func (h *Hub) NotifyRoomDeleted(userID int64, room string) {
-	payload, err := json.Marshal(map[string]string{"room": room})
+	h.send(userID, room, sseFrame("room-deleted", []byte(`{"room":`+strconvJSON(room)+`}`)))
+}
+
+// sseFrame builds a single "event: <name>\ndata: <payload>\n\n" frame in one
+// allocation, avoiding the intermediate fmt.Sprintf + []byte conversion.
+func sseFrame(name string, payload []byte) []byte {
+	n := len("event: \ndata: \n\n") + len(name) + len(payload)
+	b := make([]byte, 0, n)
+	b = append(b, "event: "...)
+	b = append(b, name...)
+	b = append(b, '\n', 'd', 'a', 't', 'a', ':', ' ')
+	b = append(b, payload...)
+	b = append(b, '\n', '\n')
+	return b
+}
+
+// strconvJSON quotes s as a JSON string body (without the surrounding quotes).
+func strconvJSON(s string) string {
+	b, err := json.Marshal(s)
 	if err != nil {
-		return
+		return `""`
 	}
-	h.send(userID, room, []byte(fmt.Sprintf("event: room-deleted\ndata: %s\n\n", payload)))
+	return string(b)
 }
 
 // send fans out a preformatted frame to clients in room (or "*").
