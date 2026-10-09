@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AgentChat — Đăng nhập</title>
+<script>try{const t=localStorage.getItem('theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');document.documentElement.dataset.theme=t;}catch(e){}</script>
+<link rel="stylesheet" href="assets/css/tokens.css" />
+<link rel="stylesheet" href="assets/css/base.css" />
+<link rel="stylesheet" href="assets/css/layout.css" />
+<link rel="stylesheet" href="assets/css/components.css" />
+<style>
+  .login-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: var(--s5);
+  }
+  .login-card {
+    width: 100%;
+    max-width: 380px;
+    padding: var(--s6);
+    border-radius: var(--app-radius);
+    box-shadow: var(--shadow);
+  }
+  .login-head {
+    margin-bottom: var(--s5);
+  }
+  .login-title {
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+  .login-sub {
+    margin-top: var(--s1);
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .login-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s4);
+  }
+  .login-form .btn {
+    width: 100%;
+    padding: 11px 16px;
+  }
+  .login-error {
+    display: none;
+    font-size: 13px;
+    color: var(--danger);
+  }
+  .login-error.show {
+    display: block;
+  }
+  .login-card .divider {
+    margin: var(--s5) 0;
+  }
+  [hidden] {
+    display: none !important;
+  }
+</style>
+</head>
+<body>
+<div class="login-wrap">
+  <div class="card login-card">
+    <div class="login-head">
+      <div class="wordmark">AgentChat</div>
+      <div class="login-sub">Đăng nhập để tiếp tục</div>
+    </div>
+
+    <form id="login-form" class="login-form" autocomplete="on">
+      <div class="field">
+        <label for="username">Tên đăng nhập</label>
+        <input id="username" name="username" class="input" type="text" autocomplete="username" required />
+      </div>
+      <div class="field">
+        <label for="password">Mật khẩu</label>
+        <input id="password" name="password" class="input" type="password" autocomplete="current-password" required />
+      </div>
+      <div id="login-error" class="login-error" role="alert"></div>
+      <button id="login-submit" type="submit" class="btn btn-primary">Đăng nhập</button>
+    </form>
+
+    <div id="change-box" hidden>
+      <div class="divider"></div>
+      <div class="login-sub" style="margin-bottom: var(--s4);">Bạn cần đổi mật khẩu trước khi tiếp tục.</div>
+      <form id="change-form" class="login-form">
+        <div class="field">
+          <label for="old-password">Mật khẩu hiện tại</label>
+          <input id="old-password" name="old-password" class="input" type="password" autocomplete="current-password" required />
+        </div>
+        <div class="field">
+          <label for="new-password">Mật khẩu mới</label>
+          <input id="new-password" name="new-password" class="input" type="password" autocomplete="new-password" required />
+        </div>
+        <div class="field">
+          <label for="confirm-password">Nhập lại mật khẩu mới</label>
+          <input id="confirm-password" name="confirm-password" class="input" type="password" autocomplete="new-password" required />
+        </div>
+        <div id="change-error" class="login-error" role="alert"></div>
+        <button id="change-submit" type="submit" class="btn btn-primary">Đổi mật khẩu</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script src="assets/js/api.js"></script>
+<script src="assets/js/auth.js"></script>
+<script>
+(function () {
+  const loginForm = document.getElementById('login-form');
+  const loginError = document.getElementById('login-error');
+  const loginSubmit = document.getElementById('login-submit');
+  const changeBox = document.getElementById('change-box');
+  const changeForm = document.getElementById('change-form');
+  const changeError = document.getElementById('change-error');
+  const changeSubmit = document.getElementById('change-submit');
+
+  function showError(el, msg) {
+    el.textContent = msg || 'Có lỗi xảy ra';
+    el.classList.add('show');
+  }
+
+  function clearError(el) {
+    el.textContent = '';
+    el.classList.remove('show');
+  }
+
+  function go(user) {
+    window.location.href = '/app.html';
+  }
+
+  function revealChange() {
+    loginForm.hidden = true;
+    changeBox.hidden = false;
+    const first = changeForm.querySelector('input');
+    if (first) first.focus();
+  }
+
+  loginForm.addEventListener('submit', async function (e) {
+    e.preventDefault();
+    clearError(loginError);
+    loginSubmit.disabled = true;
+    const username = document.getElementById('username').value.trim();
+    const password = document.getElementById('password').value;
+    try {
+      const user = await window.Auth.login(username, password);
+      if (user && user.must_change_password) {
+        revealChange();
+      } else {
+        go(user);
+      }
+    } catch (err) {
+      if (err && err.status === 429) {
+        showError(loginError, 'Quá nhiều lần thử. Vui lòng đợi rồi thử lại.');
+      } else {
+        showError(loginError, (err && err.message) ? err.message : 'Đăng nhập thất bại');
+      }
+    } finally {
+      loginSubmit.disabled = false;
+    }
+  });
+
+  changeForm.addEventListener('submit', async function (e) {
+    e.preventDefault();
+    clearError(changeError);
+    const oldPw = document.getElementById('old-password').value;
+    const newPw = document.getElementById('new-password').value;
+    const confirmPw = document.getElementById('confirm-password').value;
+    if (newPw !== confirmPw) {
+      showError(changeError, 'Mật khẩu nhập lại không khớp');
+      return;
+    }
+    changeSubmit.disabled = true;
+    try {
+      await window.Auth.changePassword(oldPw, newPw);
+      const user = await window.Auth.me();
+      go(user);
+    } catch (err) {
+      showError(changeError, (err && err.message) ? err.message : 'Đổi mật khẩu thất bại');
+    } finally {
+      changeSubmit.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>

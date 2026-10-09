@@ -18,6 +18,7 @@ type Message struct {
 	ID        int64    `json:"id"`
 	Agent     string   `json:"agent"`
 	Room      string   `json:"room"`
+	UserID    int64    `json:"user_id"`
 	Content   string   `json:"content"`
 	Mentions  []string `json:"mentions"`
 	ReplyTo   *int64   `json:"reply_to"`
@@ -41,7 +42,7 @@ type Store struct {
 func Open(path string) (*Store, error) {
 	// Apply pragmas through the DSN so every pooled connection inherits them.
 	dsn := fmt.Sprintf(
-		"file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=wal_autocheckpoint(1000)&_pragma=busy_timeout(5000)",
+		"file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=wal_autocheckpoint(1000)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)",
 		path,
 	)
 	db, err := sql.Open("sqlite", dsn)
@@ -61,6 +62,7 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) init() error {
 	stmts := []string{
+		"PRAGMA foreign_keys=ON",
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA synchronous=NORMAL",
 		"PRAGMA wal_autocheckpoint=1000",
@@ -81,14 +83,14 @@ func (s *Store) init() error {
 			return fmt.Errorf("init %q: %w", q, err)
 		}
 	}
-	return nil
+	return s.Migrate()
 }
 
 // Close closes the underlying database.
 func (s *Store) Close() error { return s.db.Close() }
 
 // Insert stores a message and returns it with its assigned id/created_at.
-func (s *Store) Insert(agent, room, content string, mentions []string, replyTo *int64) (*Message, error) {
+func (s *Store) Insert(userID int64, agent, room, content string, mentions []string, replyTo *int64) (*Message, error) {
 	if mentions == nil {
 		mentions = []string{}
 	}
@@ -97,10 +99,13 @@ func (s *Store) Insert(agent, room, content string, mentions []string, replyTo *
 		return nil, err
 	}
 	res, err := s.db.Exec(
-		`INSERT INTO messages (agent, room, content, mentions, reply_to) VALUES (?, ?, ?, ?, ?)`,
-		agent, room, content, string(mj), replyTo,
+		`INSERT INTO messages (user_id, agent, room, content, mentions, reply_to) VALUES (?, ?, ?, ?, ?, ?)`,
+		userID, agent, room, content, string(mj), replyTo,
 	)
 	if err != nil {
+		return nil, err
+	}
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO rooms (user_id, name) VALUES (?, ?)`, userID, room); err != nil {
 		return nil, err
 	}
 	id, err := res.LastInsertId()
@@ -110,18 +115,37 @@ func (s *Store) Insert(agent, room, content string, mentions []string, replyTo *
 	return s.GetByID(id)
 }
 
-// GetByID returns a single message by id.
+// GetByID returns a single message by id. ids are globally unique, so it is not
+// scoped by user; callers must enforce ownership when needed.
 func (s *Store) GetByID(id int64) (*Message, error) {
 	row := s.db.QueryRow(
-		`SELECT id, agent, room, content, mentions, reply_to, created_at FROM messages WHERE id = ?`, id)
+		`SELECT id, user_id, agent, room, content, mentions, reply_to, created_at FROM messages WHERE id = ?`, id)
 	return scanMessage(row)
 }
 
-// ListRooms returns per-room aggregates ordered by last_id DESC.
-func (s *Store) ListRooms() ([]Room, error) {
+// MessageBelongsToUser reports whether a message with the given id exists and
+// belongs to userID.
+func (s *Store) MessageBelongsToUser(userID, id int64) bool {
+	var n int
+	err := s.db.QueryRow(`SELECT 1 FROM messages WHERE id = ? AND user_id = ?`, id, userID).Scan(&n)
+	return err == nil
+}
+
+// ListRooms returns per-room aggregates ordered by last_id DESC, including
+// registered rooms that have no messages yet (count 0, last_id 0).
+func (s *Store) ListRooms(userID int64) ([]Room, error) {
 	rows, err := s.db.Query(
-		`SELECT room, COUNT(*) AS count, MAX(id) AS last_id, MAX(created_at) AS last_at
-		 FROM messages GROUP BY room ORDER BY last_id DESC`)
+		`SELECT r.name AS room,
+		        COALESCE(m.count, 0) AS count,
+		        COALESCE(m.last_id, 0) AS last_id,
+		        m.last_at AS last_at
+		 FROM rooms r
+		 LEFT JOIN (
+		   SELECT room, COUNT(*) AS count, MAX(id) AS last_id, MAX(created_at) AS last_at
+		   FROM messages WHERE user_id = ? GROUP BY room
+		 ) m ON m.room = r.name
+		 WHERE r.user_id = ?
+		 ORDER BY COALESCE(m.last_id, 0) DESC, r.name ASC`, userID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -140,10 +164,27 @@ func (s *Store) ListRooms() ([]Room, error) {
 	return rooms, rows.Err()
 }
 
-// DeleteRoom deletes all messages in a room, returning the number of rows removed.
-func (s *Store) DeleteRoom(room string) (int64, error) {
-	res, err := s.db.Exec(`DELETE FROM messages WHERE room = ?`, room)
+// CreateRoom registers an empty room for userID. It reports whether a new room
+// was created (false when it already existed).
+func (s *Store) CreateRoom(userID int64, room string) (bool, error) {
+	res, err := s.db.Exec(`INSERT OR IGNORE INTO rooms (user_id, name) VALUES (?, ?)`, userID, room)
 	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// DeleteRoom deletes all messages in a room owned by userID and unregisters it.
+func (s *Store) DeleteRoom(userID int64, room string) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM messages WHERE room = ? AND user_id = ?`, room, userID)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := s.db.Exec(`DELETE FROM rooms WHERE name = ? AND user_id = ?`, room, userID); err != nil {
 		return 0, err
 	}
 	return res.RowsAffected()
@@ -159,9 +200,12 @@ type QueryResult struct {
 
 // Query builds and runs the flexible message query (rooms, mentions, agents,
 // id range, content search, ordering and pagination).
-func (s *Store) Query(params url.Values) (*QueryResult, error) {
+func (s *Store) Query(userID int64, params url.Values) (*QueryResult, error) {
 	where := make([]string, 0, 8)
 	args := make([]any, 0, 8)
+
+	where = append(where, "user_id = ?")
+	args = append(args, userID)
 
 	rooms := filter.CSVFirst(params, "room", "rooms")
 	switch {
@@ -267,7 +311,7 @@ func (s *Store) Query(params url.Values) (*QueryResult, error) {
 		offset = 0
 	}
 
-	sqlStr := "SELECT id, agent, room, content, mentions, reply_to, created_at FROM messages"
+	sqlStr := "SELECT id, user_id, agent, room, content, mentions, reply_to, created_at FROM messages"
 	if len(where) > 0 {
 		sqlStr += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -310,7 +354,7 @@ func scanMessage(sc scanner) (*Message, error) {
 		replyTo sql.NullInt64
 		created sql.NullString
 	)
-	if err := sc.Scan(&m.ID, &m.Agent, &m.Room, &m.Content, &ment, &replyTo, &created); err != nil {
+	if err := sc.Scan(&m.ID, &m.UserID, &m.Agent, &m.Room, &m.Content, &ment, &replyTo, &created); err != nil {
 		return nil, err
 	}
 	m.Mentions = []string{}

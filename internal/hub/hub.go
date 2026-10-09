@@ -10,8 +10,9 @@ import (
 
 // Client is a single SSE subscriber.
 type Client struct {
-	Room string
-	Ch   chan []byte
+	UserID int64
+	Room   string
+	Ch     chan []byte
 }
 
 // Hub tracks SSE clients and fans out events.
@@ -26,8 +27,8 @@ func New() *Hub {
 }
 
 // Add registers a client and returns it. The caller must Remove it on disconnect.
-func (h *Hub) Add(room string) *Client {
-	c := &Client{Room: room, Ch: make(chan []byte, 64)}
+func (h *Hub) Add(userID int64, room string) *Client {
+	c := &Client{UserID: userID, Room: room, Ch: make(chan []byte, 64)}
 	h.mu.Lock()
 	h.clients[c] = struct{}{}
 	h.mu.Unlock()
@@ -52,29 +53,29 @@ func (h *Hub) Count() int {
 }
 
 // Broadcast sends a "message" event for the given room to matching clients.
-func (h *Hub) Broadcast(room string, msg any) {
+func (h *Hub) Broadcast(userID int64, room string, msg any) {
 	payload, err := json.Marshal(msg)
 	if err != nil {
 		return
 	}
-	h.send(room, []byte(fmt.Sprintf("event: message\ndata: %s\n\n", payload)))
+	h.send(userID, room, []byte(fmt.Sprintf("event: message\ndata: %s\n\n", payload)))
 }
 
 // NotifyRoomDeleted sends a "room-deleted" event for the given room.
-func (h *Hub) NotifyRoomDeleted(room string) {
+func (h *Hub) NotifyRoomDeleted(userID int64, room string) {
 	payload, err := json.Marshal(map[string]string{"room": room})
 	if err != nil {
 		return
 	}
-	h.send(room, []byte(fmt.Sprintf("event: room-deleted\ndata: %s\n\n", payload)))
+	h.send(userID, room, []byte(fmt.Sprintf("event: room-deleted\ndata: %s\n\n", payload)))
 }
 
 // send fans out a preformatted frame to clients in room (or "*").
-func (h *Hub) send(room string, frame []byte) {
+func (h *Hub) send(userID int64, room string, frame []byte) {
 	h.mu.RLock()
 	targets := make([]*Client, 0, len(h.clients))
 	for c := range h.clients {
-		if c.Room == room || c.Room == "*" {
+		if (userID == 0 || c.UserID == userID) && (c.Room == room || c.Room == "*") {
 			targets = append(targets, c)
 		}
 	}

@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AgentChat</title>
+<script>try{const t=localStorage.getItem('theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');document.documentElement.dataset.theme=t;}catch(e){}</script>
+<link rel="stylesheet" href="assets/css/tokens.css" />
+<link rel="stylesheet" href="assets/css/base.css" />
+<link rel="stylesheet" href="assets/css/layout.css" />
+<link rel="stylesheet" href="assets/css/components.css" />
+<link rel="stylesheet" href="assets/css/chat.css" />
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked-katex-extension@5/lib/index.umd.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16/dist/katex.min.css">
+<style>
+  .panel[hidden] { display: none !important; }
+  #messages { flex: 1; overflow-y: auto; }
+  .chat-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: var(--s4); }
+  .rooms-head { display: flex; align-items: center; justify-content: space-between; }
+  #rooms { display: flex; flex-direction: column; gap: 2px; }
+  .room { cursor: pointer; }
+  .room .right { display: flex; align-items: center; gap: var(--s2); margin-left: auto; }
+  .room .btn-icon { visibility: hidden; }
+  .room:hover .btn-icon { visibility: visible; }
+  .composer-wrap { margin-top: var(--s4); }
+  .profile-menu { position: absolute; left: var(--s4); bottom: 72px; z-index: 20; min-width: 200px; padding: var(--s2); background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); box-shadow: var(--shadow); }
+  .profile-menu .nav-item { cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="app-card">
+  <main class="main">
+    <section class="content">
+      <div class="panel chat-panel" data-panel="chat">
+        <div id="messages" class="scroll"></div>
+        <form id="composer" class="composer-pill composer-wrap">
+          <button type="button" class="plus-btn" title="Thêm" aria-label="Thêm">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+          <button type="button" class="chip" id="tools-chip">Tools</button>
+          <button type="button" class="model-select" id="model-select">Flash ⌄</button>
+          <input type="text" id="input" placeholder="Nhập tin… dùng @agent" autocomplete="off" />
+          <button type="button" class="mic" title="Giọng nói" aria-label="Giọng nói">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+          </button>
+          <button type="submit" class="action-btn" title="Gửi" aria-label="Gửi">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+          </button>
+        </form>
+      </div>
+
+      <div class="panel" id="panel-agents" data-panel="agents" hidden></div>
+
+      <div class="panel" id="panel-keys" data-panel="keys" hidden></div>
+
+      <div class="panel" id="panel-settings" data-panel="settings" hidden></div>
+
+      <div class="panel" id="panel-dashboard" data-panel="dashboard" hidden>
+        <div class="grid-stats" id="stats"></div>
+
+        <div class="tabs" id="dash-tabs">
+          <button class="tab active" data-tab="users" type="button">Users</button>
+          <button class="tab" data-tab="agents" type="button">Agents</button>
+          <button class="tab" data-tab="rooms" type="button">Rooms</button>
+        </div>
+
+        <div class="dash-tab" data-tab="users">
+          <div class="panel-head">
+            <span class="sidebar-label">Người dùng</span>
+            <button class="btn btn-primary" id="create-user-btn">Tạo user</button>
+          </div>
+          <div class="table-wrap">
+            <table class="table table-fixed" id="users-table">
+              <colgroup>
+                <col style="width:170px" />
+                <col style="width:90px" />
+                <col style="width:100px" />
+                <col style="width:80px" />
+                <col style="width:90px" />
+                <col style="width:70px" />
+                <col style="width:80px" />
+                <col style="width:170px" />
+                <col style="width:330px" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th>Username</th>
+                  <th>Role</th>
+                  <th>Status</th>
+                  <th>Rooms</th>
+                  <th>Messages</th>
+                  <th>Keys</th>
+                  <th>Agents</th>
+                  <th>Last login</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="users-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="dash-tab" data-tab="agents" hidden>
+          <div class="panel-head">
+            <span class="sidebar-label">Agents toàn hệ thống</span>
+          </div>
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Agent</th>
+                  <th>Username</th>
+                  <th>Messages</th>
+                  <th>Last activity</th>
+                </tr>
+              </thead>
+              <tbody id="agents-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="dash-tab" data-tab="rooms" hidden>
+          <div class="panel-head">
+            <span class="sidebar-label">Rooms toàn hệ thống</span>
+          </div>
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Room</th>
+                  <th>Username</th>
+                  <th>Messages</th>
+                  <th>Last id</th>
+                  <th>Last activity</th>
+                </tr>
+              </thead>
+              <tbody id="rooms-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="assets/js/api.js"></script>
+<script src="assets/js/auth.js"></script>
+<script src="assets/js/shell.js"></script>
+<script src="assets/js/store.js"></script>
+<script src="assets/js/ui.js"></script>
+<script src="assets/js/chat.js"></script>
+<script src="assets/js/agents.js"></script>
+<script src="assets/js/keys.js"></script>
+<script src="assets/js/settings.js"></script>
+<script src="assets/js/admin.js"></script>
+<script>
+(async function () {
+  const panelRenderers = {
+    chat: () => {
+      const room = (window.Store && window.Store.state && window.Store.state.room) || 'general';
+      const el = document.getElementById('roomName');
+      if (el) el.textContent = '#' + room;
+    },
+    agents: () => window.Agents && window.Agents.render(),
+    keys: () => window.Keys && window.Keys.render(),
+    settings: () => window.Settings && window.Settings.render(),
+    dashboard: () => window.Admin && window.Admin.render()
+  };
+  document.addEventListener('shell:nav', (e) => {
+    const render = panelRenderers[e.detail.panel];
+    if (render) render();
+  });
+
+  window.Shell.mount({
+    app: 'AgentChat',
+    nav: [
+      { panel: 'chat', label: 'Chat', icon: 'chat', active: true },
+      { panel: 'agents', label: 'Agents', icon: 'agents' },
+      { panel: 'keys', label: 'API Keys', icon: 'keys' },
+      { panel: 'settings', label: 'Settings', icon: 'settings' },
+      { panel: 'dashboard', label: 'Dashboard', icon: 'dashboard', id: 'nav-admin', hidden: true }
+    ],
+    search: true,
+    rooms: true,
+    collapse: true,
+    profileMenu: true,
+    header: { crumb: '#general', crumbId: 'roomName', conn: true }
+  });
+
+  const user = await window.UI.init();
+  const adminNav = document.getElementById('nav-admin');
+  if (adminNav && user && user.role === 'admin') adminNav.hidden = false;
+
+  window.Chat.start();
+})();
+</script>
+</body>
+</html>

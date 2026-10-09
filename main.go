@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -22,11 +24,29 @@ func main() {
 	dbPath := env("DB_PATH", defaultDBPath())
 	uiDir := env("UI_DIR", ".")
 
+	authRequired := env("AUTH_REQUIRED", "1")
+	bcryptCost := envInt("BCRYPT_COST", 12)
+	if bcryptCost < 10 {
+		bcryptCost = 12
+	}
+	_ = env("TLS", "0")
+
 	st, err := store.Open(dbPath)
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
 	defer st.Close()
+
+	if err := st.SeedAdmin(); err != nil {
+		log.Fatalf("seed admin: %v", err)
+	}
+
+	log.Printf("auth_required=%s", authRequired)
+	log.Printf("bcrypt_cost=%d", bcryptCost)
+	if authRequired == "0" {
+		log.Printf("WARNING: AUTH_REQUIRED=0 — authentication is DISABLED (debug only). Set AUTH_REQUIRED=1 for production.")
+		log.Printf("WARNING: /api/admin/* is blocked unless DEV_ALLOW_ADMIN=1 is also set.")
+	}
 
 	h := hub.New()
 	srv := api.New(st, h, uiDir)
@@ -61,6 +81,18 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func envInt(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 // defaultDBPath returns chat.db next to the executable.
